@@ -1,201 +1,251 @@
-TELEGRAM_TOKEN = "8461262353:AAEqHf4cYS_A-owVheW23DSZuX8QPEzvpNk"
+import ee
+import os
+import json
+import requests
+import logging
+import time
+import re
+
+# =========================
+# INIT EARTH ENGINE
+# =========================
+
+service_account = json.loads(os.environ["GEE_KEY"])
+
+credentials = ee.ServiceAccountCredentials(
+    service_account["client_email"],
+    key_data=json.dumps(service_account)
+)
+
+ee.Initialize(credentials)
+
+# =========================
+# TELEGRAM CONFIG
+# =========================
+
+TELEGRAM_TOKEN = "8385287062:AAGgwYA0l7-Cuq4jA7dgcy5GkFAvDp7X1GM"
 TELEGRAM_CHAT_ID = "1145085024"
-TOMORROW_API_KEY = "mafGBXd8wO6o1DHn7Ok8PwpG4zJvFIWB"
-
-import time, requests, logging, threading
-from datetime import datetime
-import pytz
-
-LAT = -7.6048403
-LON = 111.9102329
-THRESHOLD = 4.0
-INTERVAL_MONITOR = 15 * 60
-INTERVAL_RAIN_UPDATE = 30 * 60
-WIB = pytz.timezone("Asia/Jakarta")
-REPORT_HOURS = {5, 9, 15, 16, 17, 20}
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
 log = logging.getLogger(__name__)
-alerted = False
-last_report_hour = -1
+
 last_update_id = 0
-last_rain_notif = 0
 
-def get_weather_openmeteo():
-    url = (f"https://api.open-meteo.com/v1/forecast"
-           f"?latitude={LAT}&longitude={LON}"
-           f"&current=rain,precipitation,temperature_2m,relative_humidity_2m,"
-           f"wind_speed_10m,cloud_cover"
-           f"&timezone=Asia%2FJakarta")
-    d = requests.get(url, timeout=10).json()["current"]
-    rain = d.get("rain") or d.get("precipitation") or 0.0
-    return {
-        "rain": rain,
-        "temp": d.get("temperature_2m"),
-        "humid": d.get("relative_humidity_2m"),
-        "wind": d.get("wind_speed_10m"),
-        "cloud": d.get("cloud_cover"),
-    }
+# =========================
+# TELEGRAM SEND
+# =========================
 
-def get_weather_tomorrow():
-    url = (f"https://api.tomorrow.io/v4/timelines"
-           f"?location={LAT},{LON}"
-           f"&fields=precipitationIntensity,temperature,humidity,windSpeed,cloudCover"
-           f"&timesteps=current"
-           f"&units=metric"
-           f"&apikey={TOMORROW_API_KEY}")
-    r = requests.get(url, timeout=10).json()
-    d = r["data"]["timelines"][0]["intervals"][0]["values"]
-    return {
-        "rain": d.get("precipitationIntensity", 0.0),
-        "temp": d.get("temperature"),
-        "humid": d.get("humidity"),
-        "wind": d.get("windSpeed"),
-        "cloud": d.get("cloudCover"),
-    }
+def tg(msg, chat_id=None):
 
-def interpret(w):
-    rain = w["rain"]
-    cloud = w["cloud"]
-    if rain == 0:
-        if cloud >= 75:
-            rain_interp = "Tidak hujan, tapi langit sangat mendung ☁️ — berpotensi hujan"
-        elif cloud >= 40:
-            rain_interp = "Tidak hujan, langit agak berawan 🌤"
-        else:
-            rain_interp = "Cerah, tidak ada tanda hujan ☀️"
-    elif rain <= 1:
-        rain_interp = "Gerimis ringan — belum perlu khawatir 🌦"
-    elif rain <= 4:
-        rain_interp = "Hujan sedang — pantau terus ⚠️"
-    elif rain <= 10:
-        rain_interp = "Hujan deras — risiko banjir, pompa perlu dinyalakan! 🚨"
-    elif rain <= 20:
-        rain_interp = "Hujan sangat deras — bahaya banjir tinggi! 🆘"
-    else:
-        rain_interp = "Hujan ekstrem — segera ambil tindakan! 🆘🆘"
+    cid = chat_id or TELEGRAM_CHAT_ID
 
-    if cloud >= 90:
-        cloud_interp = "Sangat mendung ({}%) — hujan bisa turun kapan saja".format(cloud)
-    elif cloud >= 75:
-        cloud_interp = "Mendung tebal ({}%) — waspada".format(cloud)
-    elif cloud >= 40:
-        cloud_interp = "Berawan ({}%)".format(cloud)
-    elif cloud >= 10:
-        cloud_interp = "Sedikit berawan ({}%)".format(cloud)
-    else:
-        cloud_interp = "Cerah ({}%)".format(cloud)
-
-    return rain_interp, cloud_interp
-
-def tg(msg):
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                  json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
-                  timeout=10)
-
-def format_openmeteo(w, title="📊 <b>Laporan Cuaca</b>"):
-    rain_interp, cloud_interp = interpret(w)
-    now = datetime.now(WIB).strftime("%H:%M WIB, %d %b %Y")
-    return (
-        f"🔵 <b>[OPEN-METEO]</b>\n"
-        f"{title} — {now}\n"
-        f"📍 Mangundikaran, Nganjuk\n\n"
-        f"🌧 Curah hujan: <b>{w['rain']:.1f} mm/jam</b>\n"
-        f"↳ {rain_interp}\n\n"
-        f"☁️ Tutupan awan: <b>{w['cloud']}%</b>\n"
-        f"↳ {cloud_interp}\n\n"
-        f"🌡 Suhu: {w['temp']:.1f}°C\n"
-        f"💧 Kelembaban: {w['humid']}%\n"
-        f"💨 Angin: {w['wind']:.0f} km/jam"
+    requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+        json={"chat_id": cid, "text": msg, "parse_mode": "HTML"},
+        timeout=15
     )
 
-def format_tomorrow(w, title="🚨 <b>POMPA PERLU DINYALAKAN!</b>"):
-    rain_interp, cloud_interp = interpret(w)
-    now = datetime.now(WIB).strftime("%H:%M WIB, %d %b %Y")
-    return (
-        f"🔴 <b>[TOMORROW.IO LIVE]</b>\n"
-        f"{title} — {now}\n"
-        f"📍 Mangundikaran, Nganjuk\n\n"
-        f"🌧 Curah hujan: <b>{w['rain']:.1f} mm/jam</b>\n"
-        f"↳ {rain_interp}\n\n"
-        f"☁️ Tutupan awan: <b>{w['cloud']}%</b>\n"
-        f"↳ {cloud_interp}\n\n"
-        f"🌡 Suhu: {w['temp']:.1f}°C\n"
-        f"💧 Kelembaban: {w['humid']}%\n"
-        f"💨 Angin: {w['wind']:.0f} km/jam"
+# =========================
+# SOIL DATA FROM GEE
+# =========================
+
+depths = ["0-5cm","5-15cm","15-30cm","30-60cm","60-100cm","100-200cm"]
+
+datasets = {
+"clay":"projects/soilgrids-isric/clay_mean",
+"sand":"projects/soilgrids-isric/sand_mean",
+"silt":"projects/soilgrids-isric/silt_mean",
+"bdod":"projects/soilgrids-isric/bdod_mean",
+"soc":"projects/soilgrids-isric/soc_mean",
+"cec":"projects/soilgrids-isric/cec_mean"
+}
+
+def get_soil_all(lat,lon):
+
+    point = ee.Geometry.Point([lon,lat])
+    result = {}
+
+    for depth in depths:
+
+        result[depth] = {}
+
+        for prop,ds in datasets.items():
+
+            img = ee.Image(ds).select(depth)
+
+            val = img.reduceRegion(
+                reducer=ee.Reducer.mean(),
+                geometry=point,
+                scale=250
+            ).get(depth)
+
+            if val:
+                result[depth][prop] = ee.Number(val).getInfo()
+
+    return result
+
+# =========================
+# TERRAIN DATA
+# =========================
+
+def get_terrain(lat,lon):
+
+    point = ee.Geometry.Point([lon,lat])
+
+    dem = ee.Image("USGS/SRTMGL1_003")
+
+    slope = ee.Terrain.slope(dem)
+
+    elevation = dem.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=point,
+        scale=30
+    ).get("elevation")
+
+    slope_val = slope.reduceRegion(
+        reducer=ee.Reducer.mean(),
+        geometry=point,
+        scale=30
+    ).get("slope")
+
+    return {
+        "elevation": ee.Number(elevation).getInfo(),
+        "slope": ee.Number(slope_val).getInfo()
+    }
+
+# =========================
+# SOIL CLASSIFICATION
+# =========================
+
+def classify_soil(clay,sand,silt):
+
+    if clay >= 40 and silt >= 40:
+        return "Silty Clay"
+
+    if clay >= 40:
+        return "Clay"
+
+    if sand >= 85:
+        return "Sand"
+
+    if sand >= 70:
+        return "Loamy Sand"
+
+    if clay >= 27:
+        return "Clay Loam"
+
+    if silt >= 50:
+        return "Silt Loam"
+
+    return "Loam"
+
+# =========================
+# ANALYSIS
+# =========================
+
+def analyze_soil(lat,lon,chat_id):
+
+    tg(f"⏳ Analisis tanah...\n📍 {lat}, {lon}", chat_id)
+
+    try:
+
+        soil = get_soil_all(lat,lon)
+        terrain = get_terrain(lat,lon)
+
+    except Exception as e:
+
+        tg(f"❌ Error: {str(e)}", chat_id)
+        return
+
+    msg = (
+    f"📍 <b>SOIL REPORT</b>\n"
+    f"Koordinat: {lat},{lon}\n\n"
     )
+
+    for depth,data in soil.items():
+
+        clay = data.get("clay",0)
+        sand = data.get("sand",0)
+        silt = data.get("silt",0)
+
+        soil_type = classify_soil(clay,sand,silt)
+
+        msg += (
+        f"━━ {depth} ━━\n"
+        f"Clay: {clay:.1f}%\n"
+        f"Sand: {sand:.1f}%\n"
+        f"Silt: {silt:.1f}%\n"
+        f"Soil: {soil_type}\n\n"
+        )
+
+    msg += (
+    "━━ TERRAIN ━━\n"
+    f"Elevation: {terrain['elevation']:.1f} m\n"
+    f"Slope: {terrain['slope']:.2f}°\n"
+    )
+
+    tg(msg,chat_id)
+
+# =========================
+# TELEGRAM LOOP
+# =========================
 
 def check_messages():
+
     global last_update_id
+
     while True:
+
         try:
-            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_update_id + 1}&timeout=30"
-            r = requests.get(url, timeout=35).json()
-            for update in r.get("result", []):
+
+            url = (
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
+            f"?offset={last_update_id+1}&timeout=30"
+            )
+
+            r = requests.get(url,timeout=35).json()
+
+            for update in r.get("result",[]):
+
                 last_update_id = update["update_id"]
-                msg = update.get("message", {})
-                chat_id = str(msg.get("chat", {}).get("id", ""))
-                text = msg.get("text", "").strip().lower()
-                if chat_id == TELEGRAM_CHAT_ID:
-                    if text in ["cek", "/cek"]:
-                        log.info("Cek manual Open-Meteo")
-                        w = get_weather_openmeteo()
-                        tg(format_openmeteo(w, "🔍 <b>Cek Manual</b>"))
-                    elif text in ["live", "/live"]:
-                        log.info("Cek manual Tomorrow.io")
-                        w = get_weather_tomorrow()
-                        tg(format_tomorrow(w, "🔍 <b>Cek Live</b>"))
-        except Exception as e:
-            log.error(f"Error cek pesan: {e}")
-        time.sleep(2)
 
-def main():
-    global alerted, last_report_hour, last_rain_notif
-    log.info("Bot start")
-    tg("✅ <b>Penjaga Pompa aktif!</b>\n"
-       "📍 Mangundikaran, Nganjuk\n"
-       "🔵 Ketik <b>cek</b> → Open-Meteo (unlimited)\n"
-       "🔴 Ketik <b>live</b> → Tomorrow.io (real-time)\n"
-       "📊 Laporan rutin: 05.00, 09.00, 15.00, 16.00, 17.00, 20.00 WIB\n"
-       "🚨 Alert otomatis Tomorrow.io jika hujan &gt;4 mm/jam")
+                msg = update.get("message",{})
+                chat_id = str(msg.get("chat",{}).get("id",""))
 
-    t = threading.Thread(target=check_messages, daemon=True)
-    t.start()
+                text = msg.get("text","").strip()
 
-    while True:
-        try:
-            now = datetime.now(WIB)
-            hour = now.hour
+                coord = re.search(
+                r"(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)",
+                text
+                )
 
-            w_tomorrow = get_weather_tomorrow()
-            log.info(f"[Tomorrow.io] Hujan: {w_tomorrow['rain']} mm/jam")
+                if coord:
 
-            if w_tomorrow["rain"] > THRESHOLD:
-                now_ts = time.time()
-                if not alerted:
-                    tg(format_tomorrow(w_tomorrow) +
-                       "\n\n⚡ <b>Segera hubungi tetangga!</b>")
-                    alerted = True
-                    last_rain_notif = now_ts
-                elif now_ts - last_rain_notif >= INTERVAL_RAIN_UPDATE:
-                    tg(format_tomorrow(w_tomorrow, "🚨 <b>Masih hujan deras!</b>") +
-                       "\n\n⚡ Pompa tetap nyalakan!")
-                    last_rain_notif = now_ts
-            else:
-                if alerted:
-                    tg(format_tomorrow(w_tomorrow, "✅ <b>Hujan reda</b>") +
-                       "\n\nPompa bisa dimatikan.")
-                alerted = False
-                last_rain_notif = 0
+                    lat = float(coord.group(1))
+                    lon = float(coord.group(2))
 
-            if hour in REPORT_HOURS and hour != last_report_hour:
-                w_open = get_weather_openmeteo()
-                tg(format_openmeteo(w_open))
-                last_report_hour = hour
+                    analyze_soil(lat,lon,chat_id)
+
+                else:
+
+                    tg(
+                    "Kirim koordinat:\n<code>-7.6048,111.9102</code>",
+                    chat_id
+                    )
 
         except Exception as e:
+
             log.error(e)
 
-        time.sleep(INTERVAL_MONITOR)
+        time.sleep(2)
+
+# =========================
+# MAIN
+# =========================
+
+def main():
+
+    tg("✅ Soil Bot GEE aktif")
+    check_messages()
 
 main()
